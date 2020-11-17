@@ -8,14 +8,19 @@
 __author__ = 'Ceilopty'
 __all__ = ['Jq', 'AlwaysDump']
 
-import numpy as np
+
+import os
+
+# import numpy as np
 import pandas as pd
 import jqdatasdk as jq
 
-from AUTH import AUTH_ID, AUTH_PASSWORD
+from _AUTH import AUTH_ID, AUTH_PASSWORD
 
 
-LIST_PICKLE_PATH = '../data/futures_list.pkl'
+LIST_PICKLE_PATH = './data/futures_list.pkl'
+# convert to abspath
+LIST_PICKLE_PATH = os.path.join(os.path.abspath(os.path.curdir), LIST_PICKLE_PATH)
 
 
 class Jq:
@@ -49,6 +54,9 @@ class Jq:
         return pd.read_pickle(LIST_PICKLE_PATH)
 
     def _dump_pickle(self):
+        path_dir = os.path.split(LIST_PICKLE_PATH)[0]
+        if not os.path.exists(path_dir):
+            os.mkdir(path_dir)
         self.list.to_pickle(LIST_PICKLE_PATH)
 
     @property
