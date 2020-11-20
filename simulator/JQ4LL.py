@@ -184,4 +184,11 @@ if __name__ == "__main__":
     pp = a.get_bars('P9999.XDCE')
     pp.pipe(Indicators.kdj)
     pp.pipe(Indicators.ma)
+    from simulator.enters import Touch, At
+    j_cross_up_80 = Touch('J','cross_up',80)
+    b = pp[j_cross_up_80]
+    j_ge_100 = At('J','ge',100)
+    c = pp[j_ge_100]
+    d = pp[j_cross_up_80 & j_ge_100]
+
 
