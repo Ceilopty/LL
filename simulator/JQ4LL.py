@@ -184,11 +184,18 @@ if __name__ == "__main__":
     pp = a.get_bars('P9999.XDCE')
     pp.pipe(Indicators.kdj)
     pp.pipe(Indicators.ma)
-    from simulator.enters import Touch, At
+    from simulator.condition import Touch, At
     j_cross_up_80 = Touch('J','cross_up',80)
+    j_ge_100 = At('J', 'ge', 100)
     b = pp[j_cross_up_80]
-    j_ge_100 = At('J','ge',100)
     c = pp[j_ge_100]
-    d = pp[j_cross_up_80 & j_ge_100]
+    b_and_c = pp[j_cross_up_80 & j_ge_100]
+    b_inner_c = b.align(c,join='inner')[0]
+    b_or_c = pp[j_cross_up_80 | j_ge_100]
+    b_outer_c = b.combine_first(c)
+    assert b_and_c.equals(b_inner_c)
+    assert b_or_c.equals(b_outer_c)
 
+    not_j_cross_up_80 = ~j_cross_up_80
+    assert pp.equals(pp[not_j_cross_up_80 | j_cross_up_80])
 
