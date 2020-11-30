@@ -81,23 +81,23 @@ class Jq:
             return self._count
 
     def get_bars(self,
-                 security,          # Code. Can be `str` or `tuple` of `str`s.
-                 count=1,             # PosInt. Number of bars. Make no sense if too large.
-                 unit='15m',        # Time period of a bar. Can be one of '1/5/15/30/60/120m', '1d/w/M' &etc.
-                 fields=('date',    # Fields to got.
-                         'open',
-                         'high',
-                         'low',
-                         'close',
-                         'volume',  # Deal Volume
-                         'money',   # Deal Money
-                         'open_interest',  # Unclosed Amount
-                         'factor'   # FQ factor
-                         ),
+                 security: str,  # Code. Can be `str` or `tuple` of `str`s.
+                 count: int = 1,  # PosInt. Number of bars. Make no sense if too large.
+                 unit: str = '15m',  # Time period of a bar. Can be one of '1/5/15/30/60/120m', '1d/w/M' &etc.
+                 fields: tuple = ('date',  # Fields to got.
+                                  'open',
+                                  'high',
+                                  'low',
+                                  'close',
+                                  'volume',  # Deal Volume
+                                  'money',  # Deal Money
+                                  'open_interest',  # Unclosed Amount
+                                  'factor'  # FQ factor
+                                  ),
                  include_now=False,  # Whether including `last` to `now` as an incomplete bar or not.
-                 end_dt=None,        # `datetime.datetime` or `None`. `datetime.now()` by default.
-                 fq_ref_date=None,   # Reference date for fq.
-                 df=True,            # Whether return `dataframe` or not.
+                 end_dt=None,  # `datetime.datetime` or `None`. `datetime.now()` by default.
+                 fq_ref_date=None,  # Reference date for fq.
+                 df=True,  # Whether return `dataframe` or not.
                  ):
         if isinstance(security, tuple):
             return {sec: self.get_bars(sec) for sec in security}
@@ -121,14 +121,15 @@ class Jq:
         try:
             return object.__getattribute__(self, item)
         except AttributeError as e:
-            raise KeyError(f"'Jq' object has no attribute '{item}'")
+            raise KeyError(f"'Jq' object has no attribute '{item}'") from e
 
 
 class Indicators:
     """Algorithms such as KDJ and MA"""
+
     @staticmethod
     def kdj(df, n=9, m1=3, m2=3):
-        if any(indicator in df for indicator in "KDJ"):
+        if all(indicator in df for indicator in "KDJ"):
             return
         low = df['low'].rolling(n, min_periods=1).min()
         high = df['high'].rolling(n, min_periods=1).max()
@@ -145,6 +146,7 @@ class Indicators:
             df[f'ma_{period}'] = df['close'].rolling(period, min_periods=period).mean()
 
 
+# Not been used yet.
 class AlwaysDump:
     def __init__(self, data=None):
         if data is not None:
@@ -165,37 +167,69 @@ class AlwaysDump:
             with open(f'./data/dump{datetime.now()}.pkl'.replace(':', '_'), 'wb') as f:
                 dump(res[0], f)
             return res[0]
+
         return wrapper
 
 
 # Make sure path is exist. If not, mkdir for upper level.
-def _exist_path(path):
+def _exist_path(path, *, _upper=False):
+    """:param _upper Flag which is set to True in recursive calls.
+    Only mkdir when True."""
     path = os.path.abspath(path)
     if os.path.exists(path):
         return path
     upper, curr = os.path.split(path)
-    if os.path.exists(upper):
+    if os.path.exists(upper) and _upper:
         os.mkdir(path)
-    return os.path.join(_exist_path(upper), curr)
+    return os.path.join(_exist_path(upper, _upper=True), curr)
 
 
+# Test & debug
 if __name__ == "__main__":
     a = Jq()
     pp = a.get_bars('P9999.XDCE')
+    au = a.get_bars('AU9999.XSGE')
     pp.pipe(Indicators.kdj)
     pp.pipe(Indicators.ma)
-    from simulator.condition import Touch, At
-    j_cross_up_80 = Touch('J','cross_up',80)
-    j_ge_100 = At('J', 'ge', 100)
+    from simulator.condition import Action, Status, Indicator
+
+    j_cross_up_80 = Action(Indicator('J'), 'cross_up', 80)
+    j_ge_100 = Status('J', 'ge', 100)
     b = pp[j_cross_up_80]
     c = pp[j_ge_100]
     b_and_c = pp[j_cross_up_80 & j_ge_100]
-    b_inner_c = b.align(c,join='inner')[0]
+    b_inner_c = b.align(c, join='inner')[0]
     b_or_c = pp[j_cross_up_80 | j_ge_100]
     b_outer_c = b.combine_first(c)
     assert b_and_c.equals(b_inner_c)
     assert b_or_c.equals(b_outer_c)
 
     not_j_cross_up_80 = ~j_cross_up_80
+    n_or_y = not_j_cross_up_80 | j_cross_up_80
     assert pp.equals(pp[not_j_cross_up_80 | j_cross_up_80])
+    assert not pp[not_j_cross_up_80 & j_cross_up_80].any().any()
+
+    from simulator.condition import All, Any, Count, Interval
+
+    b_and_c_ = All(j_ge_100, j_cross_up_80)
+    b_or_c_ = Any(*b_and_c_)
+    assert b_and_c.equals(pp[b_and_c_])
+    assert b_or_c.equals(pp[b_or_c_])
+
+    assert All(b_and_c_, j_cross_up_80) is b_and_c_
+    w = Count(j_ge_100)
+    j_cross_up_70 = Action("J", "cross_up", 70)
+    op = Any(b_and_c_, j_cross_up_80, j_cross_up_70)
+    assert op is Any(op, op, b_or_c_)
+    assert op is op | b_or_c_ | j_cross_up_70
+    assert op & j_ge_100 is (b_or_c_ | j_cross_up_70) & j_ge_100
+    assert op is not b_or_c_
+    i = Count(j_ge_100, j_cross_up_80)
+
+    k, d, j = (Indicator(ind) for ind in 'KDJ')
+    iv = Interval(-1, 1, closed='both')
+
+    j_climb_4 = j - j.shift(1) > 4
+    j_climb_4_alt = j > j.shift(1) + 4
+    assert pp[j_climb_4].equals(pp[j_climb_4_alt])
 
