@@ -101,15 +101,16 @@ class Jq:
                  ):
         if isinstance(security, tuple):
             return {sec: self.get_bars(sec) for sec in security}
+        path = f'./data/securities/{security}.{unit}.pkl'
         if hasattr(self, security):
             return object.__getattribute__(self, security)
-        if os.path.exists(f'./data/securities/{security}.pkl'):
-            object.__setattr__(self, security, pd.read_pickle(f'./data/securities/{security}.pkl'))
+        if os.path.exists(path):
+            object.__setattr__(self, security, pd.read_pickle(path))
             return object.__getattribute__(self, security)
         if self.confirm_get(f'bars of {security}'):
             res = jq.get_bars(security, count, unit, fields, include_now, end_dt, fq_ref_date, df)
             object.__setattr__(self, security, res)
-            res.to_pickle(_exist_path(f'./data/securities/{security}.pkl'))
+            res.to_pickle(_exist_path(path))
             return res
         print('Got Nothing')
 
@@ -123,9 +124,16 @@ class Jq:
         except AttributeError as e:
             raise KeyError(f"'Jq' object has no attribute '{item}'") from e
 
+    def p9999(self):
+        df = self.get_bars('P9999.XDCE')
+        df.pipe(Indicators())
+        return df
+
 
 class Indicators:
     """Algorithms such as KDJ and MA"""
+
+    CONTINUAL_LIMIT = 2
 
     @staticmethod
     def kdj(df, n=9, m1=3, m2=3):
@@ -144,6 +152,21 @@ class Indicators:
             if f'ma_{period}' in df:
                 continue
             df[f'ma_{period}'] = df['close'].rolling(period, min_periods=period).mean()
+
+    @staticmethod
+    def border(df):
+        date = df['date']
+        pro = date.shift(-1) - date
+        pre = date - date.shift(1)
+        mode = pro.mode()[0]
+        df['first'] = ~(pre <= mode * Indicators.CONTINUAL_LIMIT)
+        df['last'] = ~(pro <= mode * Indicators.CONTINUAL_LIMIT)
+
+    def __call__(self, *args, **kwargs):
+        df = args[0]
+        self.kdj(df)
+        self.ma(df)
+        self.border(df)
 
 
 # Not been used yet.
@@ -189,8 +212,7 @@ if __name__ == "__main__":
     a = Jq()
     pp = a.get_bars('P9999.XDCE')
     au = a.get_bars('AU9999.XSGE')
-    pp.pipe(Indicators.kdj)
-    pp.pipe(Indicators.ma)
+    pp.pipe(Indicators())
     from simulator.condition import Action, Status, Indicator
 
     j_cross_up_80 = Action(Indicator('J'), 'cross_up', 80)
@@ -202,7 +224,7 @@ if __name__ == "__main__":
     b_or_c = pp[j_cross_up_80 | j_ge_100]
     b_outer_c = b.combine_first(c)
     assert b_and_c.equals(b_inner_c)
-    assert b_or_c.equals(b_outer_c)
+    assert b_or_c.index.equals(b_outer_c.index)  # dtypes of border in outer is object, not bool.
 
     not_j_cross_up_80 = ~j_cross_up_80
     n_or_y = not_j_cross_up_80 | j_cross_up_80
@@ -219,7 +241,7 @@ if __name__ == "__main__":
     assert All(b_and_c_, j_cross_up_80) is b_and_c_
     w = Count(j_ge_100)
     j_cross_up_70 = Action("J", "cross_up", 70)
-    op = Any(b_and_c_, j_cross_up_80, j_cross_up_70)
+    op = Any(b_and_c_, j_cross_up_80, j_cross_up_70, j_ge_100)
     assert op is Any(op, op, b_or_c_)
     assert op is op | b_or_c_ | j_cross_up_70
     assert op & j_ge_100 is (b_or_c_ | j_cross_up_70) & j_ge_100
@@ -233,3 +255,4 @@ if __name__ == "__main__":
     j_climb_4_alt = j > j.shift(1) + 4
     assert pp[j_climb_4].equals(pp[j_climb_4_alt])
 
+    assert All() & j_ge_100 is j_ge_100

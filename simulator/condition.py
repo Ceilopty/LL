@@ -2,7 +2,7 @@
 
 """
 
-from typing import Union, Iterable
+from typing import Union, Iterable, Set, Callable
 from functools import wraps, total_ordering, reduce
 from pandas import DataFrame as dF, Series, Interval as _Iv
 
@@ -11,8 +11,10 @@ __all__ = ["Action",
            "Alias",
            "All",
            "Any",
+           "Not",
            "Count",
            "Indicator",
+           "Flag",
            "Interval",
            ]
 
@@ -50,22 +52,31 @@ def _operators_conductor(operator_name, _bool=None):
 
 
 # Divide iter into two groups: the instances and the others.
-def _get_all_ins(iterable, cls) -> (list, list):
-    instance = []
-    others = []
+def _get_all_ins(iterable, cls) -> (set, set):
+    instance = set()
+    others = set()
     for may_be_ins in iterable:
         if isinstance(may_be_ins, cls):
-            instance.append(may_be_ins)
+            instance.add(may_be_ins)
         else:
-            others.append(may_be_ins)
+            others.add(may_be_ins)
     return instance, others
 
 
-# Remove duplications
+# Remove duplications.
 def _unique(iterable: Iterable[set]) -> set:
     res = set()
     for item in iterable:
         res.update(item)
+    return res
+
+
+# Remove conflict.
+def _conflict(iterable: Iterable[set], discard: Iterable, func: Callable) -> Set[Iterable]:
+    res = set()
+    for item in iterable:
+        if not set(item) & set(discard):
+            res.add(func(*item))
     return res
 
 
@@ -136,12 +147,16 @@ class Condition:
             s = self._indicator.ind
         elif isinstance(self._indicator, str):
             s = self._indicator
+        elif isinstance(self._indicator, Count):
+            s = hash(self._indicator)
         else:
             raise TypeError(f'Need Indicator, got {type(self._indicator)}')
         if isinstance(value._indicator, Indicator):
             v = value._indicator.ind
         elif isinstance(value._indicator, str):
             v = value._indicator
+        elif isinstance(value._indicator, Count):
+            v = hash(value._indicator)
         else:
             raise TypeError(f'Need Indicator, got {type(self._indicator)}')
         if s != v:
@@ -362,11 +377,17 @@ class _AnyTime(Condition):
     def __bool__(self):
         return False
 
+    def __invert__(self):
+        return NoTime
+
 
 class _NoTime(_AnyTime):
     _collections = None
     _bool = False
     __slots__ = ()
+
+    def __invert__(self):
+        return AnyTime
 
 
 AnyTime = _AnyTime()
@@ -398,7 +419,6 @@ class _Set:
     _collections = {}
     _algorithm = ""
     __slots__ = ('_hash',  # key in `_collection`.
-                 '_init',  # args for __init__
                  '_set',   # data
                  )
 
@@ -418,6 +438,7 @@ class _Set:
             raise TypeError("Got something strange. Only `Condition` can be here")
         # Peel the cover like `All(All(blah blah))`.
         # Notice that `_Set`(`Condition`) returns a `Condition` instead of `_Set`.
+        args = tuple(set(args))
         if len(args) == 1:
             if isinstance(args[0], Not):
                 if issubclass(cls, Not):
@@ -429,10 +450,6 @@ class _Set:
         elif issubclass(cls, Not):
             raise ValueError("Too much for `Not`.")
         # It's easy to handle if only `Condition`s in `args`.
-        args = tuple(set(args))
-        if len(args) == 1 and isinstance(args[0], Condition):
-            if not issubclass(cls, (Not, Count)):
-                return args[0]
         if all(isinstance(arg, (Condition, Not)) for arg in args):
             not_ins, con_ins = _get_all_ins(args, Not)
             for n in not_ins:
@@ -441,56 +458,68 @@ class _Set:
                         return AnyTime
                     elif issubclass(cls, All):
                         return NoTime
-
+            if AnyTime in con_ins:
+                if issubclass(cls, Any):
+                    return AnyTime
+                elif issubclass(cls, All):
+                    con_ins.remove(AnyTime)
+            if NoTime in con_ins:
+                if issubclass(cls, Any):
+                    con_ins.remove(NoTime)
+                elif issubclass(cls, All):
+                    return NoTime
+            args = not_ins | con_ins
+            if len(args) == 1 and not issubclass(cls, Not):
+                return args.pop()
             # Generate a key witch would be used later.
             # Notice that order in args makes no difference.
             key = (cls.__name__,) + tuple(sorted(args))
         else:
             # While `_Set`s appear, it depends.
-            # Multiple `_Set`s of the same type should combine.
-            # Also, do all `Condition`s.
+            # Our goal is to eliminate `All` in `All`,
+            # and `Any` in 'Any', so that recursion is possible.
             # To begin with, divide Sets from Conditions.
             set_ins, con_ins = _get_all_ins(args, (All, Any))
             # Then take `All`s and `Any`s apart.
             and_ins, or_ins = _get_all_ins(set_ins, All)
             # Remove duplicates
-            and_set = _unique(and_ins)
-            or_set = _unique(or_ins)
+            and_set = set(and_ins)
+            or_set = set(or_ins)
             # Combine `Condition`s to witch type we are generating.
-            # Remove `foo` in `Any` from `All(All(foo, bar), Any(_foo_, baz))`
-            # Remove `foo` in `All` from `Any(All(_foo_, bar), Any(foo, baz))`
-            # Which means when generation `All`, anything in inner `All`
-            # should be removed from inner `Any`, vice versa.
+            # Remove `Any` from `All(All(_foo_, bar), _Any_(_foo_, baz))` as `foo` exists.
+            # Remove `All` from `Any(_All_(_foo_, bar), Any(_foo_, baz))` as `foo` exists.
+            # Which means when generation `All`, any inner `Any` should be
+            # removed if it shares common elements with inner `All`, vice versa.
             if issubclass(cls, All):
                 # Combine.
+                and_set = _unique(and_set)
                 and_set.update(con_ins)
+                and_set.discard(AnyTime)
                 # Remove union.
-                or_set.difference_update(and_set & or_set)
-                # If `or_set` has only one element now, combine to `and_set`.
-                if len(or_set) == 1:
-                    and_set.add(or_set.pop())
+                or_set = _conflict(or_set, and_set, Any)
+                if not or_set:
+                    return All(*and_set)
+                if NoTime in and_set:
+                    return NoTime
             elif issubclass(cls, Any):
                 # Combine.
+                or_set = _unique(or_set)
                 or_set.update(con_ins)
+                or_set.discard(NoTime)
                 # Remove union.
-                and_set.difference_update(and_set & or_set)
-                # Vice versa
-                if len(and_set) == 1:
-                    or_set.add(and_set.pop())
-            # Now we've got simplified `args`.
-            args = (All(*and_set), Any(*or_set))
+                and_set = _conflict(and_set, or_set, All)
+                if not and_set:
+                    return Any(*or_set)
+                if AnyTime in or_set:
+                    return AnyTime
+            args = (*or_set, *and_set)
+            # Hopefully we've got simplified `args`.
             # If either `All` or `Any` absents, simply return the other.
-            if not args[0]:
-                return args[1]
-            if not args[1]:
-                return args[0]
             # If we come here, it seems clear that `args` consists of `All` and `Any`,
             # but there's still chance that `args` is still hashable.
             # It happens when both `and_set` and `or_set` len 1.
             if all(isinstance(arg, Condition) for arg in args):
-                if args[0] is args[1]:
-                    return args[0]
-                key = (cls.__name__, min(args), max(args))
+                key = (cls.__name__, *sorted(args))
             # Both `All` and `Any` are now in `args`.
             # We use a hashable key.
             # Again notice that `set`s have no order, so we sorted it.
@@ -502,13 +531,8 @@ class _Set:
             cls._collections[key] = self
             self._hash = key
             # Store args for initialization here.
-            self._init = args
+            self._set = set(args)
         return cls._collections[key]
-
-    def __init__(self, *args, **kw) -> None:
-        if hasattr(self, '_init'):
-            self._set = set(self._init)
-            del self._init
 
     def __call__(self, df: dF) -> Series:
         func = _operators_conductor(self._algorithm)
@@ -564,7 +588,7 @@ class Not(_Set):
 
 
 def _count_comp(comp_name):
-    def func(self, other):
+    def func(self, other=None):
         return Status(self, comp_name, other)
     return func
 
@@ -609,25 +633,33 @@ class Count(_Set):
 class Indicator(Count):
     _collections = {}
     __slots__ = ('_indicator',
-                 '_shift'
+                 '_shift',
+                 '_attr',
                  )
 
     def __new__(cls, *args, **kwargs):
-        key = args[0], kwargs.get("shift", 0)
+        key = args[0], kwargs.get("shift", 0), kwargs.get("attr", None)
         if key not in cls._collections:
             self = object.__new__(cls)
             cls._collections[key] = self
             self._indicator = key[0]
             self._shift = key[1]
+            self._attr = key[2]
         return cls._collections[key]
 
     def __str__(self):
-        return self.ind_shf
+        return self.ind_shf_attr
 
     __repr__ = __str__
 
     def __call__(self, df: dF) -> Series:
-        return df[self._indicator].shift(self._shift)
+        res = df[self._indicator].shift(self._shift)
+        if self._attr:
+            return getattr(res, self._attr, res)()
+        return res
+
+    def __getattr__(self, item):
+        return Indicator(self.ind, shift=self.shf, attr=item)
 
     def __hash__(self):
         return hash(str(self))
@@ -639,6 +671,12 @@ class Indicator(Count):
     @property
     def shf(self):
         return self._shift
+
+    @property
+    def ind_shf_attr(self):
+        if self._attr is None:
+            return self.ind_shf
+        return f"{self.ind_shf}.{self._attr}"
 
     @property
     def ind_shf(self):
@@ -685,6 +723,11 @@ class IndicatorAddSub(Indicator):
             return getattr(df.pipe(self._self), self._operator)(df.pipe(self._other))
         else:
             return getattr(df.pipe(self._self), self._operator)(self._other)
+
+
+class Flag(Indicator):
+    def __invert__(self):
+        return Not(self.eq(True))
 
 
 class Interval(_Iv):
